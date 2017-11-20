@@ -163,18 +163,89 @@ int main(int argc, char **argv)
  * then execute it immediately. Otherwise, fork a child process and
  * run the job in the context of the child. If the job is running in
  * the foreground, wait for it to terminate and then return.  Note:
- * each child process must have a unique process group ID so that our
+ * each child proces if(!builtin_cmd(argv)){
+ 188         if((pid = fork()) < 0)
+ 189             unix_error("fork error");
+ 190
+ 191         if(pid == 0) {
+ 192             if (execve(argv[0], argv, environ) < 0) {
+ 193                 printf("%s : Command not found\n", argv[0]);
+ 194                 exit(0);
+ 195             }
+ 196         }
+ s must have a unique process group ID so that our
  * background children don't receive SIGINT (SIGTSTP) from the kernel
  * when we type ctrl-c (ctrl-z) at the keyboard.  
+ if(!builtin_cmd(argv)){
+ 198         if((pid = fork()) < 0)
+ 199             unix_error("fork error");
+ 200
+ 201         if(pid == 0) {
+ 202             if (execve(argv[0], argv, environ) < 0) {
+ 203                 printf("%s : Command not found\n", argv[0]);
+ 204                 exit(0);
+ 205             }
+ 206         }
  */
 void eval(char *cmdline) 
 {
+	char *argv[MAXARGS];  // command 저장
+	char buf[MAXLINE];
+	int bg;
+	pid_t pid;
+
+	/*trace 01
+	parseline(cmdline, argv);
+	builtin_cmd(argv);
+	*/
+	strcpy(buf, cmdline);
+	bg = parseline(buf, argv);
+
+	if (argv[0] == NULL)
+		return;
+
+	if(!builtin_cmd(argv)){
+		if((pid = fork()) < 0)
+			unix_error("fork error");
+
+		if(pid == 0) {
+			if (execve(argv[0], argv, environ) < 0) {
+				printf("%s : Command not found\n", argv[0]);
+				exit(0);
+			}
+		}
+
+		if (!bg) {
+			addjob(jobs, pid, FG, cmdline);
+			int status;
+			if (waitpid(pid, &status, 0) < 0)
+				unix_error("waitfg: waitpid error");
+			deletejob(jobs,pid);
+		}
+
+		else {
+			addjob(jobs, pid, BG, cmdline);
+		    printf("(%d) (%d) %s", pid2jid(pid), (int)pid, cmdline);
+		}
+	}
 	return;
 }
 
 int builtin_cmd(char **argv)
 {
-	return 0;
+	char *cmd = argv[0];
+	if(!strcmp(cmd, "quit")) { /* quit commad */
+		exit(0);
+	}
+	if (!strcmp(cmd, "&")){
+		return 1;
+	}
+	if (!strcmp(cmd,"jobs")){
+		listjobs(jobs,1);
+	return 1;
+	}
+
+	return 0; /* not a builtin command */
 }
 
 void waitfg(pid_t pid, int output_fd)
