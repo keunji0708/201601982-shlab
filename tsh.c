@@ -163,29 +163,9 @@ int main(int argc, char **argv)
  * then execute it immediately. Otherwise, fork a child process and
  * run the job in the context of the child. If the job is running in
  * the foreground, wait for it to terminate and then return.  Note:
- * each child proces if(!builtin_cmd(argv)){
- 188         if((pid = fork()) < 0)
- 189             unix_error("fork error");
- 190
- 191         if(pid == 0) {
- 192             if (execve(argv[0], argv, environ) < 0) {
- 193                 printf("%s : Command not found\n", argv[0]);
- 194                 exit(0);
- 195             }
- 196         }
- s must have a unique process group ID so that our
+ * each child proces s must have a unique process group ID so that our
  * background children don't receive SIGINT (SIGTSTP) from the kernel
  * when we type ctrl-c (ctrl-z) at the keyboard.  
- if(!builtin_cmd(argv)){
- 198         if((pid = fork()) < 0)
- 199             unix_error("fork error");
- 200
- 201         if(pid == 0) {
- 202             if (execve(argv[0], argv, environ) < 0) {
- 203                 printf("%s : Command not found\n", argv[0]);
- 204                 exit(0);
- 205             }
- 206         }
  */
 void eval(char *cmdline) 
 {
@@ -193,39 +173,55 @@ void eval(char *cmdline)
 	char buf[MAXLINE];
 	int bg;
 	pid_t pid;
+	sigset_t mask;
 
-	/*trace 01
-	parseline(cmdline, argv);
-	builtin_cmd(argv);
-	*/
 	strcpy(buf, cmdline);
 	bg = parseline(buf, argv);
+
+	sigemptyset(&mask);
+	// 인자로 주어진 시그널 set에 포함되어 있는 모든 시그널을 삭제
+
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGTSTP);
+	// 시그널 번호가 SIGINT,SIGCHLD,SIGTSTP인 시그널을 시그널 set에 추가
 
 	if (argv[0] == NULL)
 		return;
 
 	if(!builtin_cmd(argv)){
+		//buildin_cmd가 아닌 경우, Check Child Process
+		sigprocmask(SIG_BLOCK, &mask, NULL);//Block SIGCHLD
+		
 		if((pid = fork()) < 0)
 			unix_error("fork error");
-
-		if(pid == 0) {
+		
+		else if(pid == 0) {//Child Process인 경우, execve() 수행
+			sigprocmask(SIG_UNBLOCK, &mask, NULL);//Unblock SIGCHLD
+			setpgid(0, 0);
+			// pid로 설정된 process의 process group의 ID를 pgid로 설정
 			if (execve(argv[0], argv, environ) < 0) {
 				printf("%s : Command not found\n", argv[0]);
 				exit(0);
 			}
 		}
 
-		if (!bg) {
-			addjob(jobs, pid, FG, cmdline);
-			int status;
-			if (waitpid(pid, &status, 0) < 0)
-				unix_error("waitfg: waitpid error");
-			deletejob(jobs,pid);
+		if (!bg) { // Foreground 일때,
+			addjob(jobs, pid, FG, cmdline); // joblist에 job 추가
+			sigprocmask(SIG_UNBLOCK, &mask, NULL); // Unblock SIGCHLD
+			waitfg(pid, 1); // Race Condition
+			/*int status;
+			  if (waitpid(pid, & status, 0) < 0){
+			 	 unix_error ("waitfg : waitpid error:);
+			  }
+			  deletejob(jobs, pid);
+			  */
 		}
 
-		else {
-			addjob(jobs, pid, BG, cmdline);
-		    printf("(%d) (%d) %s", pid2jid(pid), (int)pid, cmdline);
+		else { // Background 일때,
+			addjob(jobs, pid, BG, cmdline); // joblist에 job 추가
+			sigprocmask(SIG_UNBLOCK, &mask, NULL);// Unblock SIGCHLD
+			printf("(%d) (%d) %s", pid2jid(pid),(int)pid, cmdline);
 		}
 	}
 	return;
@@ -234,22 +230,73 @@ void eval(char *cmdline)
 int builtin_cmd(char **argv)
 {
 	char *cmd = argv[0];
-	if(!strcmp(cmd, "quit")) { /* quit commad */
+	struct job_t *j;
+
+	if(!strcmp(cmd, "quit")){ /* quit commad */
 		exit(0);
 	}
-	if (!strcmp(cmd, "&")){
+	if (!strcmp(cmd,"jobs")){ /* jobs command */
+		listjobs(jobs,1);
 		return 1;
 	}
-	if (!strcmp(cmd,"jobs")){
-		listjobs(jobs,1);
-	return 1;
+	if (!strcmp(cmd, "&")) {
+		return 1;
 	}
-
+	if ((!strcmp(cmd, "bg")) | (!strcmp(cmd, "fg"))){
+		int jobid = (argv[1][0] == '%' ? 1 : 0); // JID인지 PID인지 확인
+		if (jobid == 1){
+			if ((j = getjobjid(jobs, atoi(&argv[1][1]))) == NULL){
+				// 주어진 Job ID가 없는 경우
+				printf("%s : No such job\n", argv[1]);
+			}
+		}
+		else {
+			if ((j = getjobpid(jobs, atoi(argv[1]))) == NULL){
+				// 주어진 Process ID가 없는 경우
+				printf("(%d) : No such process\n", atoi(argv[1]));
+			}
+		}	
+		if (!strcmp(cmd, "bg")){ /* bg command*/
+			j->state = BG; // state를 BG로 바꿔줌
+			printf("[%d] (%d) %s", j->jid, j->pid, j->cmdline);
+			kill(-j->pid, SIGCONT); // SIGCONT를 이용, 중지된 작업 다시 시작
+			return 1;
+		}
+		if (!strcmp(cmd, "fg")){ /* fg command*/
+			j->state = FG; // state를 FG로 바꿔줌
+			kill(-j->pid, SIGCONT);// SIGCONT를이용, 중지된 작업 다시 시작
+			waitfg(j->pid, 1); // Job이 끝날때까지 기다림 
+			return 1;
+		}
+	}
 	return 0; /* not a builtin command */
 }
 
 void waitfg(pid_t pid, int output_fd)
 {
+	struct job_t *j = getjobpid(jobs, pid);
+	char buf[MAXLINE];
+
+	// The FG job has already completed and been reaped by the andler
+	if (!j)
+		return;
+
+	/*
+	* Wait for process pid to longer be the foregrnund process.
+	* Note: Using pause() instead of sleep() would introduce a race
+	* that couldecnuse us to miss the signal
+	*/
+	while (j->pid == pid && j->state == FG)
+		sleep(1);
+
+	if (verbose) {
+		memset(buf, '\0', MAXLINE);
+		sprintf(buf, "waitfg: Process (%d) no longer the fg process:q\n", pid);
+		if (write(output_fd, buf, strlen(buf)) < 0) {
+			fprintf(stderr, "Error writing to file\n");
+			exit(1);
+		}
+	}
 	return;
 }
 
@@ -265,7 +312,32 @@ void waitfg(pid_t pid, int output_fd)
  *     currently running children to terminate.  
  */
 void sigchld_handler(int sig) 
-{
+{		
+	struct job_t *j;
+	int status;
+	pid_t pid;
+
+	/*Child Process가 종료될때까지 기다린후, Parent Process 처리*/
+	while ((pid = waitpid(-1, &status, WUNTRACED|WNOHANG)) > 0){
+
+		/*Child Process가 어떤 signal에 의해  종료된 경우*/
+		if(WIFSIGNALED(status)){
+			printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), (int)pid, WTERMSIG(status));
+			deletejob(jobs, pid);
+		}
+
+		/*Child가 정지된 경우*/
+		else if(WIFSTOPPED(status)){
+			j = getjobpid(jobs, pid);
+			j->state = ST; // job의 상태를 stop으로 변경
+			printf("Job [%d] (%d) stopped by signal %d\n", pid2jid(pid), (int)pid, WSTOPSIG(status));
+		}
+
+		/*자식이 정상적으로 종료된 경우, 0이 아닌 값 리턴*/
+		else if(WIFEXITED(status)) {
+			deletejob(jobs, pid);
+		}
+	}
 	return;
 }
 
@@ -276,6 +348,11 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+	pid_t pid = fgpid(jobs); //FG 작업 pid
+
+	if (pid > 0){
+		kill(-pid, SIGINT); // FG 작업에만 SIGINT가 처리
+	} // kill()는 지정한 pid를 가지는 process에 signal 전달
 	return;
 }
 
@@ -286,6 +363,11 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+	pid_t pid = fgpid(jobs); // FG 작업 pid
+
+	if (pid > 0){
+		kill(-pid, SIGTSTP); // FG 작업에만 SIGTSTP가 처리
+	}
 	return;
 }
 
