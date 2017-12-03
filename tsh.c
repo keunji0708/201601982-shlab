@@ -198,7 +198,10 @@ void eval(char *cmdline)
 		
 		else if(pid == 0) {//Child Process인 경우, execve() 수행
 			sigprocmask(SIG_UNBLOCK, &mask, NULL);//Unblock SIGCHLD
+			/*자식은 부모의 blocked set을 상속받기 때문에 unblock
+			 SIGCHILD를 해주어야 함*/
 			setpgid(0, 0);
+			// 프로세스에 프로세스 그룹 아이디를 세팅
 			// pid로 설정된 process의 process group의 ID를 pgid로 설정
 			if (execve(argv[0], argv, environ) < 0) {
 				printf("%s : Command not found\n", argv[0]);
@@ -335,7 +338,7 @@ void sigchld_handler(int sig)
 
 		/*자식이 정상적으로 종료된 경우, 0이 아닌 값 리턴*/
 		else if(WIFEXITED(status)) {
-			deletejob(jobs, pid);
+			deletejob(jobs, pid); // Delete the child form job list
 		}
 	}
 	return;
